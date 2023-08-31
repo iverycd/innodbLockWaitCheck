@@ -1,0 +1,10 @@
+/dbcfg.yml
+.idea
+gomysql2pg.exe
+/2023_*/*.log
+linux_*
+win_*
+gomysql2pg_*
+release
+*.tar.gz
+binary
