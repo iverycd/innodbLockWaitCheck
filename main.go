@@ -125,16 +125,70 @@ func innodbLockInfo() {
 		defer file.Close()
 		// 设置输出到终端和文件
 		multiWriter := io.MultiWriter(os.Stdout, file)
+		fmt.Println("ROW LOCK INFO:")
 		fmt.Fprintln(multiWriter, table) // 同时打印到终端以及转储到平面文件
 	} else {
 		log.Info(time.Now().Format("2006-01-02 15:04:05"), " [No row lock info]")
 	}
 }
 
+func tableLockInfo() {
+	connStr := getConfig()
+	// 生成源库数据库连接
+	PrepareSrc(connStr)
+	var (
+		connection  string
+		command     string
+		duration    string
+		state       string
+		info        string
+		trx_started string
+	)
+	table, err := gotable.Create("connection", "command", "duration", "state", "tableLockInfo", "trx_started")
+	if err != nil {
+		fmt.Println("Create table failed: ", err.Error())
+		return
+	}
+	sqlStr := "SELECT concat(user,'@',host,':',db) As connection,command,time,state,ifnull(info,'no sql'),ifnull(trx_started,'null') FROM INFORMATION_SCHEMA.processlist p left join INFORMATION_SCHEMA.INNODB_TRX trx on p.id = trx.trx_mysql_thread_id\nWHERE (TO_SECONDS(now())-TO_SECONDS(trx_started) >= (SELECT MAX(Time) FROM INFORMATION_SCHEMA.processlist\nWHERE STATE like 'Waiting for%' and command != 'Daemon') or STATE like 'Waiting for%') and command != 'Daemon'\norder by trx_started desc,time desc;"
+	rows, err := srcDb.Query(sqlStr)
+	if err != nil {
+		log.Error(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		err = rows.Scan(&connection, &command, &duration, &state, &info, &trx_started)
+		if err != nil {
+			log.Error(err)
+		}
+		tabRet := []string{connection, command, duration, state, info, trx_started}
+		_ = table.AddRow(tabRet)
+	}
+	defer srcDb.Close()
+	table.Align("connection", 1)
+	table.Align("command", 1)
+	table.Align("duration", 1)
+	table.Align("state", 1)
+	table.Align("tableLockInfo", 1)
+	table.Align("trx_started", 1)
+	if len(command) > 0 {
+		// 打开外部文本文件用于转储信息
+		file, err := os.OpenFile("log.txt", os.O_CREATE|os.O_APPEND|os.O_RDWR, os.ModePerm)
+		if err != nil {
+			fmt.Println("Can not create log.txt", err)
+			return
+		}
+		defer file.Close()
+		// 设置输出到终端和文件
+		multiWriter := io.MultiWriter(os.Stdout, file)
+		fmt.Println("TABLE LOCK INFO:")
+		fmt.Fprintln(multiWriter, table) // 同时打印到终端以及转储到平面文件
+	}
+}
+
 // 一个无缓冲泳道
 var stopFlag = make(chan bool)
 
-// CloseDemoScheduler 对外提供一个往泳道写消息的函数，如果想关闭定时任务，调用该函数即可。
+// CloseDemoScheduler 对外提供一个往通道写消息的函数，如果想关闭定时任务，调用该函数即可。
 func CloseDemoScheduler() {
 	stopFlag <- false
 }
@@ -155,6 +209,23 @@ func InitDemoScheduler(delaySeconds int) {
 			select {
 			case <-ticker.C: // 时间到了就会触发这个分支的执行，其实时间到了定时器会往ticker.C 这个 channel 中写一条数据，随后被 select 捕捉到channel中有数据可读，就读取channel数据，执行相应分支的语句
 				innodbLockInfo()
+			case <-stopFlag: // 定时任务进程在监听定时器的同时也监听这个无缓冲泳道，如果监听到无缓冲泳道的消息，则立刻 return 终止协程，也就终止了定时任务。
+				return
+			}
+		}
+	}()
+	go func() { // 用新协程去执行定时任务
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("定时器发生错误，%v", r)
+			}
+			ticker.Stop() // 意外退出时关闭定时器
+		}()
+		tableLockInfo() // 协程启动时启动一次，之后每 5 秒执行一次，如果没有这行，只有等到协程启动后的第 5 秒才会第一次执行任务
+		for {           // 用上一个死循环，不停地执行，否则只会执行一次
+			select {
+			case <-ticker.C: // 时间到了就会触发这个分支的执行，其实时间到了定时器会往ticker.C 这个 channel 中写一条数据，随后被 select 捕捉到channel中有数据可读，就读取channel数据，执行相应分支的语句
+				tableLockInfo()
 			case <-stopFlag: // 定时任务进程在监听定时器的同时也监听这个无缓冲泳道，如果监听到无缓冲泳道的消息，则立刻 return 终止协程，也就终止了定时任务。
 				return
 			}
@@ -188,7 +259,8 @@ func Info(ver string) {
 }
 
 func main() {
-	Info("0.0.1")
+	log.SetReportCaller(true)
+	Info("0.0.2")
 	configStr := getConfig()
 	// 初始化定时器，每 5s 会打印一个「demo........」
 	InitDemoScheduler(configStr.delaySeconds)

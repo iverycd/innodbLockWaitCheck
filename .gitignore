@@ -8,3 +8,4 @@ gomysql2pg_*
 release
 *.tar.gz
 binary
+log.txt
